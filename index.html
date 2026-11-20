@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Météo animée</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #fff;
+    background: #1e2a3a;
+    transition: background 1.5s ease;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+  #info {
+    position: fixed; left: 50%; bottom: 8vh; transform: translateX(-50%);
+    text-align: center; text-shadow: 0 2px 12px rgba(0,0,0,.35);
+    pointer-events: none;
+  }
+  #temp { font-size: clamp(3rem, 12vw, 7rem); font-weight: 200; line-height: 1; }
+  #label { font-size: 1.25rem; margin-top: .5rem; opacity: .9; }
+  #place { font-size: .9rem; margin-top: .25rem; opacity: .7; }
+  #city-form { position: fixed; top: 16px; right: 16px; z-index: 1; display: flex; gap: 6px; }
+  #city-form input, #city-form button {
+    font: inherit; font-size: .9rem; color: #fff;
+    background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.3);
+    border-radius: 999px; padding: 6px 12px; backdrop-filter: blur(6px);
+  }
+  #city-form input { width: 160px; }
+  #city-form input::placeholder { color: rgba(255,255,255,.7); }
+  #city-form button { cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<form id="city-form">
+  <input id="city" name="ville" placeholder="Ville (vide = ma position)" autocomplete="off">
+  <button type="submit">OK</button>
+</form>
+<div id="info">
+  <div id="temp">…</div>
+  <div id="label">Chargement de la météo</div>
+  <div id="place"></div>
+</div>
+
+<script>
+// ---------- Données météo (Open-Meteo, sans clé API) ----------
+const FALLBACK = { lat: 48.8566, lon: 2.3522, name: "Paris (position par défaut)" };
+
+// Codes WMO -> type d'animation + libellé
+function classify(code) {
+  if (code === 0) return ["clear", "Ciel dégagé"];
+  if (code <= 2) return ["partly", "Partiellement nuageux"];
+  if (code === 3) return ["cloudy", "Couvert"];
+  if (code === 45 || code === 48) return ["fog", "Brouillard"];
+  if (code >= 51 && code <= 57) return ["drizzle", "Bruine"];
+  if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return ["rain", "Pluie"];
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return ["snow", "Neige"];
+  if (code >= 95) return ["storm", "Orage"];
+  return ["cloudy", "Nuageux"];
+}
+
+async function geocode(city) {
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=fr`;
+  const data = await (await fetch(url)).json();
+  const r = data.results?.[0];
+  if (!r) return null;
+  return { lat: r.latitude, lon: r.longitude, name: [r.name, r.country].filter(Boolean).join(", ") };
+}
+
+async function getPosition() {
+  const city = new URLSearchParams(location.search).get("ville");
+  if (city) {
+    try {
+      const pos = await geocode(city);
+      if (pos) return pos;
+    } catch (e) {}
+    return { ...FALLBACK, name: `« ${city} » introuvable — ${FALLBACK.name}` };
+  }
+  return new Promise(resolve => {
+    if (!navigator.geolocation) return resolve(FALLBACK);
+    navigator.geolocation.getCurrentPosition(
+      p => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, name: "Votre position" }),
+      () => resolve(FALLBACK),
+      { timeout: 8000 }
+    );
+  });
+}
+
+async function loadWeather() {
+  // Test manuel : ?meteo=clear|partly|cloudy|fog|drizzle|rain|snow|storm & ?nuit=1
+  const params = new URLSearchParams(location.search);
+  if (params.has("meteo")) {
+    const type = params.get("meteo");
+    setScene(type, !params.has("nuit"), null, `Mode test : ${type}`, "");
+    return;
+  }
+
+  const pos = await getPosition();
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${pos.lat}&longitude=${pos.lon}` +
+                `&current=temperature_2m,weather_code,is_day,wind_speed_10m`;
+    const data = await (await fetch(url)).json();
+    const c = data.current;
+    const [type, label] = classify(c.weather_code);
+    setScene(type, c.is_day === 1, c.temperature_2m, label, pos.name, c.wind_speed_10m);
+  } catch (e) {
+    setScene("cloudy", true, null, "Météo indisponible", "");
+  }
+}
+
+// ---------- Scène ----------
+const BACKGROUNDS = {
+  day: {
+    clear:   "linear-gradient(#3a8fd9, #9fd3f7)",
+    partly:  "linear-gradient(#4a8cc7, #b5d6ee)",
+    cloudy:  "linear-gradient(#7b8794, #b8c0c8)",
+    fog:     "linear-gradient(#a9b0b6, #d9dcdf)",
+    drizzle: "linear-gradient(#6c7a88, #a5b0ba)",
+    rain:    "linear-gradient(#4b5866, #7d8996)",
+    snow:    "linear-gradient(#a8b8c8, #e6edf3)",
+    storm:   "linear-gradient(#2b3038, #4f5763)",
+  },
+  night: {
+    clear:   "linear-gradient(#060b1f, #1b2850)",
+    partly:  "linear-gradient(#0b1229, #26335a)",
+    cloudy:  "linear-gradient(#1a1f29, #353c48)",
+    fog:     "linear-gradient(#2a2f36, #474d55)",
+    drizzle: "linear-gradient(#141a24, #2d3644)",
+    rain:    "linear-gradient(#0e131b, #262e3a)",
+    snow:    "linear-gradient(#1c2433, #3d4a5e)",
+    storm:   "linear-gradient(#07090d, #1c2028)",
+  },
+};
+
+let scene = { type: "cloudy", day: true, wind: 10 };
+
+function setScene(type, day, temp, label, place, wind = 10) {
+  scene = { type, day, wind };
+  document.body.style.background = BACKGROUNDS[day ? "day" : "night"][type] || BACKGROUNDS.day.cloudy;
+  document.getElementById("temp").textContent = temp == null ? "" : `${Math.round(temp)}°`;
+  document.getElementById("label").textContent = label;
+  document.getElementById("place").textContent = place;
+  initParticles();
+}
+
+// ---------- Animation canvas ----------
+const canvas = document.getElementById("sky");
+const ctx = canvas.getContext("2d");
+let W, H, dpr;
+let drops = [], flakes = [], clouds = [], stars = [], fogBands = [];
+let flash = 0;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  initParticles();
+}
+
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function initParticles() {
+  if (!W) return;
+  const t = scene.type;
+  const area = W * H / 1e6;
+
+  const rainCount = { drizzle: 120, rain: 400, storm: 600 }[t] || 0;
+  drops = Array.from({ length: Math.round(rainCount * area) }, () => ({
+    x: rand(0, W), y: rand(-H, H), len: rand(10, 22), speed: rand(12, 20),
+  }));
+
+  flakes = t === "snow" ? Array.from({ length: Math.round(250 * area) }, () => ({
+    x: rand(0, W), y: rand(-H, H), r: rand(1.5, 4), speed: rand(0.6, 1.8), phase: rand(0, 6.28),
+  })) : [];
+
+  const cloudCount = { partly: 4, cloudy: 9, drizzle: 7, rain: 9, storm: 10, snow: 6 }[t] || 0;
+  clouds = Array.from({ length: cloudCount }, () => makeCloud(rand(-200, W)));
+
+  stars = !scene.day && (t === "clear" || t === "partly")
+    ? Array.from({ length: Math.round(180 * area) }, () => ({ x: rand(0, W), y: rand(0, H * 0.7), r: rand(0.4, 1.6), phase: rand(0, 6.28) }))
+    : [];
+
+  fogBands = t === "fog" ? Array.from({ length: 7 }, (_, i) => ({
+    y: H * (0.2 + i * 0.11), x: rand(-W, 0), speed: rand(0.15, 0.4), h: rand(60, 140),
+  })) : [];
+}
+
+function makeCloud(x) {
+  const scale = rand(0.6, 1.4);
+  return {
+    x, y: rand(H * 0.03, H * 0.4), scale, speed: rand(0.15, 0.45),
+    puffs: Array.from({ length: 5 }, (_, i) => ({ dx: i * 38 - 76, dy: rand(-22, 8), r: rand(32, 50) })),
+  };
+}
+
+function cloudColor() {
+  const dark = ["rain", "storm"].includes(scene.type);
+  if (!scene.day) return dark ? "rgba(40,45,55,0.85)" : "rgba(90,100,120,0.55)";
+  return dark ? "rgba(90,98,110,0.9)" : "rgba(255,255,255,0.85)";
+}
+
+function drawCloud(c) {
+  ctx.fillStyle = cloudColor();
+  ctx.beginPath();
+  for (const p of c.puffs) {
+    ctx.moveTo(c.x + p.dx * c.scale + p.r * c.scale, c.y + p.dy * c.scale);
+    ctx.arc(c.x + p.dx * c.scale, c.y + p.dy * c.scale, p.r * c.scale, 0, Math.PI * 2);
+  }
+  ctx.fill();
+}
+
+function drawSun(time) {
+  const x = W * 0.75, y = H * 0.22, r = Math.min(W, H) * 0.08;
+  const glow = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 4);
+  glow.addColorStop(0, "rgba(255,240,170,0.6)");
+  glow.addColorStop(1, "rgba(255,240,170,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(time * 0.0002);
+  ctx.strokeStyle = "rgba(255,230,140,0.8)";
+  ctx.lineWidth = 3; ctx.lineCap = "round";
+  for (let i = 0; i < 12; i++) {
+    ctx.rotate(Math.PI / 6);
+    const pulse = Math.sin(time * 0.003 + i) * 6;
+    ctx.beginPath();
+    ctx.moveTo(r * 1.35, 0);
+    ctx.lineTo(r * 1.75 + pulse, 0);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.fillStyle = "#ffe27a";
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawMoon() {
+  const x = W * 0.75, y = H * 0.2, r = Math.min(W, H) * 0.06;
+  const glow = ctx.createRadialGradient(x, y, r, x, y, r * 4);
+  glow.addColorStop(0, "rgba(220,230,255,0.25)");
+  glow.addColorStop(1, "rgba(220,230,255,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#eef1f8";
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+}
+
+function frame(time) {
+  ctx.clearRect(0, 0, W, H);
+  const t = scene.type;
+  const windTilt = Math.min(scene.wind, 50) / 15; // inclinaison pluie/neige
+
+  // Étoiles
+  for (const s of stars) {
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(time * 0.002 + s.phase);
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Soleil / lune
+  if (t === "clear" || t === "partly") scene.day ? drawSun(time) : drawMoon();
+
+  // Nuages
+  for (const c of clouds) {
+    c.x += c.speed * (1 + windTilt * 0.3);
+    if (c.x - 150 * c.scale > W) Object.assign(c, makeCloud(-200 * c.scale));
+    drawCloud(c);
+  }
+
+  // Pluie
+  if (drops.length) {
+    ctx.strokeStyle = scene.day ? "rgba(220,230,245,0.55)" : "rgba(170,190,215,0.5)";
+    ctx.lineWidth = t === "drizzle" ? 1 : 1.4;
+    ctx.beginPath();
+    for (const d of drops) {
+      const sp = t === "drizzle" ? d.speed * 0.6 : d.speed;
+      d.y += sp; d.x += windTilt;
+      if (d.y > H) { d.y = rand(-50, 0); d.x = rand(-50, W); }
+      ctx.moveTo(d.x, d.y);
+      ctx.lineTo(d.x + windTilt * 1.5, d.y + (t === "drizzle" ? d.len * 0.5 : d.len));
+    }
+    ctx.stroke();
+  }
+
+  // Neige
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  for (const f of flakes) {
+    f.y += f.speed;
+    f.x += Math.sin(time * 0.001 + f.phase) * 0.5 + windTilt * 0.3;
+    if (f.y > H) { f.y = -5; f.x = rand(0, W); }
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Brouillard
+  for (const b of fogBands) {
+    // Bandes qui ondulent lentement verticalement
+    const y = b.y + Math.sin(time * 0.0003 * b.speed * 5 + b.x) * 30;
+    const g = ctx.createLinearGradient(0, y - b.h, 0, y + b.h);
+    const col = scene.day ? "255,255,255" : "180,185,195";
+    g.addColorStop(0, `rgba(${col},0)`);
+    g.addColorStop(0.5, `rgba(${col},0.35)`);
+    g.addColorStop(1, `rgba(${col},0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, y - b.h, W, b.h * 2);
+  }
+
+  // Éclairs
+  if (t === "storm") {
+    if (flash <= 0 && Math.random() < 0.004) flash = 1;
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${flash * 0.7})`;
+      ctx.fillRect(0, 0, W, H);
+      flash -= 0.06;
+    }
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// Choix de ville : met à jour ?ville= dans l'URL puis recharge la météo
+const cityInput = document.getElementById("city");
+cityInput.value = new URLSearchParams(location.search).get("ville") || "";
+document.getElementById("city-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const url = new URL(location.href);
+  url.searchParams.delete("meteo");
+  const v = cityInput.value.trim();
+  v ? url.searchParams.set("ville", v) : url.searchParams.delete("ville");
+  history.replaceState(null, "", url);
+  document.getElementById("label").textContent = "Chargement de la météo";
+  loadWeather();
+});
+
+addEventListener("resize", resize);
+resize();
+requestAnimationFrame(frame);
+loadWeather();
+setInterval(loadWeather, 15 * 60 * 1000); // rafraîchit toutes les 15 min
+</script>
+</body>
+</html>
