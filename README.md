@@ -2,6 +2,8 @@
 
 Une page web toute simple qui affiche une animation plein écran correspondant à la météo actuelle : soleil, lune et étoiles, nuages, bruine, pluie, neige, brouillard ou orage avec éclairs.
 
+**En ligne : <https://ygiraud.github.io/weather/>**
+
 Tout tient dans un seul fichier, [`index.html`](index.html) : HTML, CSS et JavaScript, sans dépendance, sans build et sans clé API.
 
 ## Fonctionnement
